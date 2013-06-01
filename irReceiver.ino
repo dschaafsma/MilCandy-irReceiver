@@ -11,9 +11,8 @@
 // VCC = 5V (based on calculations for DCtoDC transformer
 //       Vout: (R1/R2+1)*Vfb=(4.5k/1.5k+1)*1.24=4.96V
 // ATmega168PV (adds 6th sleep mode to ATmega168V, perhaps other enhancements)
-// Seems no bootloader on board? (no serial response & hooking PB5 LED doesn't blink)
-// so non-bootloader programming is via:
-//  PB3(MOSI),4(MISO),5(SCK),RST on board bottom as pads
+// There is a variant of arduino bootloader: ATmegaBOOT_168_pro_8MHz.hex
+// Program via arduino s/w or via PB3(MOSI),4(MISO),5(SCK),RST pads on board bottom
 //
 // pins are in: arduino- arduinoLogical- physical- datasheet
 //        arduino tries to make it 'easier' by referring to arduino headers as 'pins'
@@ -29,7 +28,7 @@
 //   0-  0- p30- PD0 = rx on J3 (FTTDI header)
 //   1-  1- p31- PD1 = tx on J3 (FTTDI header)
 //   2-  2- p32- PD2 = button (no hardware debounce) normally open (reads VCC typically)
-//   3-  3- p01- PD3 = GreenLED
+//   3-  3- p01- PD3 = GreenLED (if RedLed is lit, Green is NOT visible!)
 //   4-  4- p02- PD4 = RedLED
 //   5-  5- p09- PD5 = 'then' port I/O #1
 //      ----->  data pin for Relay               ('then' port) (p1 on cable)
@@ -54,24 +53,32 @@
 //      p3 - VCC      (red)
 //      p4 - GND      (black)
 
-/////// ATmega168PV information
+/////// ATmega168PV information  (Flash:16kByte  EEPROM:512Byte  RAM:1kByte)
 // page/chapter numbers from ATmega168PV Datasheet 8025M-AVR-6/11 - "doc8025")
 // Timers:
-//   Timer0  -  8bit (p92/ch15)  prescaler 0 <<< drives time for Arduino infrastructure
-//   Timer1  - 16bit (p111/ch16) prescaler 0
-//   Timer2  -  8bit (p142/ch18) allows asynchronous (eg externally driven can cause wakeup interrupt)
+//   Timer0   -  8bit (p92/ch15)  prescaler 0 <<< drives time for Arduino infrastructure
+//   Timer1   - 16bit (p111/ch16) prescaler 0
+//   Timer2   -  8bit (p142/ch18) allows asynchronous (eg externally driven can cause wakeup interrupt)
 //   Watchdog - ch11.8/p51
-//   SPI     - ch19/p164
-//   USART   - ch20/p174 (supports a SPI mode)
-//   I2C/TWI - ch22/p212 (2 wire interface for communication bus)
-//   Analog  - ch23/p244 (Analog comparitor)
-//   ADC     - ch24/p248 (Analog to Digital Converter)
-
+//   SPI      - ch19/p164
+//   USART    - ch20/p174 (supports a SPI mode)
+//   I2C/TWI  - ch22/p212 (2 wire interface for communication bus)
+//   Analog   - ch23/p244 (Analog comparitor)
+//   ADC      - ch24/p248 (Analog to Digital Converter)
 // FYI around p271 has bootloader info including a simple bootloader copying ram to flash
 // fortunately this is not required as MilCandy has a Arduino bootloader variant onboard
-// NOTE: avrdude/arduino didn't want to download when using WinXP/UartSBee
 
-// define hardware (use arduino pins as 'PDx' goes away in arduino 1.5.x)
+/////// Arduino information
+// **>> if size of RAM is exceeded, compile will work, but sketch fails to boot
+//
+// performance (from a technique at: http://jeelabs.org/2010/01/06/pin-io-performance/)
+//  analogRead   ~10 samples/ms (resolution 0.1ms)
+//  digitalRead ~200 samples/ms (resolution   5usec)
+//  bitRead    ~1000 samples/ms (resolution   1usec)
+//
+
+
+// define hardware pins (use arduino pins as 'PDx' goes away in arduino 1.5.x)
 #define RS232_RX    0   // PD0
 #define RS232_TX    1   // PD1
 #define BUTTON      2   // PD2 - input
@@ -97,20 +104,46 @@
 #define NOT_PRESSED 0
 #define LIT         1
 #define NOT_LIT     0
-#define RELAY_OPEN  0
-#define RELAY_CLOSE 1
+#define RELAY_OPEN  HIGH // normally open, active low
+#define RELAY_CLOSE LOW
+#define ON          HIGH
+#define OFF         LOW
 
+// state LED
+#define STATE_LED  REDled
 // activity LED (in this case two 0.5sec blinks with 5sec off)
 #define ACTIVE_BLINKS    2
-#define ACTIVE_BLINKtime 500 // msec
-#define ACTIVE_OFFtime  5000 // msec (must be multiple of BLINKtime)
+#define ACTIVE_BLINKtime 500 // msec (eg 0.5s on, 0.5s off)
+#define ACTIVE_OFFtime  5000 // msec
 #define ACTIVE_LED GREENled
+
+#define BUTTON_DEBOUNCEtime 100 // ms
 
 // support for sleep functionality
 #include <avr/power.h>
 #include <avr/sleep.h>
-// EEPROM object
+// other libraries
 #include <EEPROM.h>
+#include <TimerOne.h> // https://code.google.com/p/arduino-timerone/downloads/list
+
+// global IR
+// ** WARNING: be careful modifying these globals, as interrupt accesses them also
+// ** WARNING: consuming too much RAM will cause arduino to fail to boot!
+#define IRentries 128  // 128*3 = 768...close to 1Kbyte
+#define TICKtime  10   // usec (100kHz)
+char     IRdata[IRentries];
+uint16_t IRtick[IRentries];
+volatile int IRdataIndex = 0;
+volatile int IRdataFull  = 0;
+
+#define DO_DEBUG
+#ifdef DO_DEBUG
+#  define DEBUG(x)    Serial.println(x)
+#  define DEBUG2(x,y) Serial.print(x);Serial.println(y)
+#else
+#  define DEBUG(x)
+#  define DEBUG2(x,y)
+#endif
 
 void setup()
 {
@@ -128,6 +161,10 @@ void setup()
   pinMode(IFportD2,    INPUT);
   pinMode(THENportD2,  OUTPUT);
 
+  // initialize timer1 (used to demodulate IR from TSOP382)
+  Timer1.initialize(TICKtime);
+  Timer1.attachInterrupt(timer1_LEDdemodulateISR);
+
   // save initial state in EEPROM
   EEPROM.write(EEPROM_VOLTAGE, analogRead(VOLTAGE)/4);
   EEPROM.write(EEPROM_LIGHT, LIT);
@@ -143,10 +180,65 @@ void loop()
   if (checkButton() == PRESSED)
   {
     toggleRelay();
+    toggleStateLED();
   }
   updateActiveLED();
+
+  if (IRdataFull)
+    dumpIRdata();
 }
 
+void timer1_LEDdemodulateISR() // interrupt keyword unsupported in arduino?
+{
+  static uint16_t tick = 0; // wrap will occur!
+  int LEDstate;
+  uint16_t priorEntryTick;
+
+  if (!IRdataFull)
+  {
+    LEDstate = digitalRead(IRrx);
+
+    if (IRdataIndex == 0)
+    {
+      // always store first entry
+      IRdata[IRdataIndex] = LEDstate;
+      IRtick[IRdataIndex] = tick;
+    }
+    else if (LEDstate != IRdata[IRdataIndex - 1])
+    {
+      IRdata[IRdataIndex] = LEDstate;
+      priorEntryTick = IRtick[IRdataIndex-1];
+      if (priorEntryTick > tick)
+        IRtick[IRdataIndex] = priorEntryTick + tick; // at least one wrap
+      else
+        IRtick[IRdataIndex] = tick - priorEntryTick;
+    }
+    IRdataIndex++;
+    if (IRdataIndex == IRentries)
+      IRdataFull = true;
+  }
+  tick++;
+}
+
+void dumpIRdata()
+{
+  Timer1.stop();
+
+  Serial.println("dumpIRdata");
+  Serial.println("index- state - time");
+  for(IRdataIndex = 0; IRdataIndex < IRentries; IRdataIndex++)
+  {
+    Serial.print(IRdataIndex);
+    Serial.print(" -  ");
+    Serial.print(IRdata[IRdataIndex], DEC);
+    Serial.print("  - ");
+    Serial.println(IRtick[IRdataIndex]);
+  }
+
+  IRdataIndex = 0;
+
+  Timer1.start();
+}
 
 void checkLightSensor()
 {
@@ -156,9 +248,9 @@ void checkLightSensor()
   if (light != lastLight)
   {
     if (light == LIT)
-      Serial.println("lighted");
+      DEBUG("lighted");
     else
-      Serial.println("not lit");
+      DEBUG("not lit");
     EEPROM.write(EEPROM_LIGHT, light);
   }
 }
@@ -171,96 +263,113 @@ void checkBattery()
   if ((battery > (lastVoltage + 0.5)) ||
       (battery < (lastVoltage - 0.5)))
   {
-    Serial.print("voltage: ");
-    Serial.println(battery);
+    DEBUG2("voltage: ", battery);
     EEPROM.write(EEPROM_VOLTAGE, battery);
   }
 }
 
 int checkButton()
 {
+  static int lastPressTime = 0;
   int button = digitalRead(BUTTON);
-  int button2;
-  int state = NOT_PRESSED;
+  int state  = NOT_PRESSED;
+  int now    = millis();
 
- reReadButton:
-  if (button == 0) // closed = pressed = pulled to GND
-  { // debounce
-    delay(10);
-    button2 = digitalRead(BUTTON);
-
-    if ((button == button2) && (state == NOT_PRESSED))
+  if (button == LOW) // closed = pressed = pulled to GND
+  {
+    if (lastPressTime == 0)
+      lastPressTime = now;
+    else if ((now - lastPressTime) > BUTTON_DEBOUNCEtime)
     {
-      Serial.println("button press");
+      DEBUG("button press");
       state = PRESSED;
-      goto reReadButton;
+      lastPressTime = 0;
     }
+    // else pressed..but still bouncing, retain start of press
   }
+  else lastPressTime = 0;
+
   return state;
-}      
+}
+
+int toggleState(int currentState, int state1, int state2)
+{
+  if (currentState == state1)
+    return state2;
+  else if (currentState == state2)
+    return state1;
+  else
+    return currentState;
+}
 
 void toggleRelay()
 {
   int relay = EEPROM.read(EEPROM_RELAY);
-  int state;
+  int state = toggleState(relay, RELAY_OPEN, RELAY_CLOSE);
 
-  if (relay == RELAY_CLOSE)
-  {
-    state = RELAY_OPEN;
-    Serial.println("relay open");
-  }
+  if (state == RELAY_OPEN)
+    DEBUG("relay open");
   else
-  {
-    state = RELAY_CLOSE;
-    Serial.println("relay close");
-  }
+    DEBUG("relay close");
 
   digitalWrite(RELAY, state);
   EEPROM.write(EEPROM_RELAY, state);
 }
 
+void toggleStateLED()
+{
+  static int stateLED = OFF;
+  int state = toggleState(stateLED, ON, OFF);
+  digitalWrite(STATE_LED, state);
+  stateLED = state;
+}
+
 // LED pattern as:
 //..       ..     ..
-#define ON  LOW
-#define OFF HIGH
-unsigned long lastActiveUpdate = 0;
-#define DO_BLINK 1
-#define OFF_TIME 2
-int activeState = DO_BLINK;
-int blinks = 0;
-int activeLED = OFF;
 void updateActiveLED()
 {
+  typedef enum {
+    DO_BLINK = 1,
+    OFF_TIME = 2
+  } state_t;
+  static unsigned long lastActiveUpdate = 0;
+  static state_t activeState = DO_BLINK;
+  static int blinks = 0;
+  static int activeLED = OFF;
   unsigned long now = millis();
   unsigned long delta = now - lastActiveUpdate;
 
-  if (delta > ACTIVE_BLINKtime)
+  switch(activeState)
   {
-    if ((activeState == OFF_TIME) &&
-        (delta > ACTIVE_OFFtime))
+  case DO_BLINK:
+    if (delta > ACTIVE_BLINKtime)
+    {
+      if (activeLED == OFF)
+      {
+        activeLED = ON;
+        blinks++;
+      }
+      else // on, time to turn off
+      {
+        activeLED = OFF;
+        if (blinks >= ACTIVE_BLINKS)
+        {
+          blinks = 0;
+          activeState = OFF_TIME;
+        }
+      }
+      digitalWrite(ACTIVE_LED, activeLED);
+      lastActiveUpdate = now;
+    }
+    break;
+  case OFF_TIME:
+    if (delta > ACTIVE_OFFtime)
     {
       lastActiveUpdate = now;
       activeState = DO_BLINK;
     }
-    else if (activeState == DO_BLINK) // implied (delta > ACTIVE_BLINKtime))
-    {
-      lastActiveUpdate = now;
-      if (activeLED == OFF)
-      {
-        digitalWrite(ACTIVE_LED, ON);
-        activeLED = ON;
-        blinks++;
-      }
-      else
-      {
-        digitalWrite(ACTIVE_LED, OFF);
-        activeLED = OFF;
-      }
-      if (blinks >= ACTIVE_BLINKS)
-      {
-        blinks = 0;
-        activeState = OFF_TIME;
-      }
-    }
-  }      
+    break;
+  default:
+    break; // do nothing..illegal state
+  }
 }
