@@ -124,17 +124,10 @@
 #include <avr/sleep.h>
 // other libraries
 #include <EEPROM.h>
-#include <TimerOne.h> // https://code.google.com/p/arduino-timerone/downloads/list
+#include <IRremote.h>  // https://github.com/shirriff/Arduino-IRremote
 
-// global IR
-// ** WARNING: be careful modifying these globals, as interrupt accesses them also
-// ** WARNING: consuming too much RAM will cause arduino to fail to boot!
-#define IRentries 128  // 128*3 = 768...close to 1Kbyte
-#define TICKtime  10   // usec (100kHz)
-char     IRdata[IRentries];
-uint16_t IRtick[IRentries];
-volatile int IRdataIndex = 0;
-volatile int IRdataFull  = 0;
+// global IRremote objects
+IRrecv irrecv(IRrx);
 
 #define DO_DEBUG
 #ifdef DO_DEBUG
@@ -150,7 +143,7 @@ void setup()
   Serial.begin(9600); // setup serial port well before output
 
   pinMode(BUTTON,      INPUT);
-  pinMode(IRrx,        INPUT);
+  irrecv.enableIRIn(); // sets IRrx as INPUT
   pinMode(GREENled,    OUTPUT);
   pinMode(REDled,      OUTPUT);
   pinMode(RELAY,       OUTPUT);
@@ -160,10 +153,6 @@ void setup()
   // unused stuff
   pinMode(IFportD2,    INPUT);
   pinMode(THENportD2,  OUTPUT);
-
-  // initialize timer1 (used to demodulate IR from TSOP382)
-  Timer1.initialize(TICKtime);
-  Timer1.attachInterrupt(timer1_LEDdemodulateISR);
 
   // save initial state in EEPROM
   EEPROM.write(EEPROM_VOLTAGE, analogRead(VOLTAGE)/4);
@@ -183,61 +172,38 @@ void loop()
     toggleStateLED();
   }
   updateActiveLED();
-
-  if (IRdataFull)
-    dumpIRdata();
-}
-
-void timer1_LEDdemodulateISR() // interrupt keyword unsupported in arduino?
-{
-  static uint16_t tick = 0; // wrap will occur!
-  int LEDstate;
-  uint16_t priorEntryTick;
-
-  if (!IRdataFull)
-  {
-    LEDstate = digitalRead(IRrx);
-
-    if (IRdataIndex == 0)
-    {
-      // always store first entry
-      IRdata[IRdataIndex] = LEDstate;
-      IRtick[IRdataIndex] = tick;
-    }
-    else if (LEDstate != IRdata[IRdataIndex - 1])
-    {
-      IRdata[IRdataIndex] = LEDstate;
-      priorEntryTick = IRtick[IRdataIndex-1];
-      if (priorEntryTick > tick)
-        IRtick[IRdataIndex] = priorEntryTick + tick; // at least one wrap
-      else
-        IRtick[IRdataIndex] = tick - priorEntryTick;
-    }
-    IRdataIndex++;
-    if (IRdataIndex == IRentries)
-      IRdataFull = true;
-  }
-  tick++;
+  dumpIRdata();
 }
 
 void dumpIRdata()
 {
-  Timer1.stop();
+  decode_results results;
 
-  Serial.println("dumpIRdata");
-  Serial.println("index- state - time");
-  for(IRdataIndex = 0; IRdataIndex < IRentries; IRdataIndex++)
+  if (irrecv.decode(&results)) // only true when data available
   {
-    Serial.print(IRdataIndex);
-    Serial.print(" -  ");
-    Serial.print(IRdata[IRdataIndex], DEC);
-    Serial.print("  - ");
-    Serial.println(IRtick[IRdataIndex]);
+    switch(results.decode_type)
+    {
+    case NEC       : Serial.print("NEC"   ); break;
+    case SONY      : Serial.print("SONY"  ); break;
+    case RC5       : Serial.print("RC5"   ); break;
+    case RC6       : Serial.print("RC6"   ); break;
+    case DISH      : Serial.print("DISH"  ); break;
+    case SHARP     : Serial.print("SHARP" ); break;
+    case PANASONIC : Serial.print("PANAS: " ); Serial.print(results.panasonicAddress); break;
+    case JVC       : Serial.print("JVC"   ); break;
+    case SANYO     : Serial.print("SANYO" ); break;
+    case MITSUBISHI: Serial.print("MITSUB"); break;
+    case UNKNOWN   : Serial.print("UNK"   ); break;
+    }
+    Serial.print(" Val: ");
+    Serial.println(results.value);
+    Serial.print(" bit: ");
+    Serial.println(results.bits);
+    Serial.print(" rawlen: ");
+    Serial.println(results.rawlen);
+
+    irrecv.resume(); // clear everything and wait for next IR code
   }
-
-  IRdataIndex = 0;
-
-  Timer1.start();
 }
 
 void checkLightSensor()
