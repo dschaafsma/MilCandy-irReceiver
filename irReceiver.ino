@@ -164,46 +164,66 @@ void setup()
 
 void loop()
 {
+  int storeIRcode;
+  decode_results results;
+  static decode_results savedCode;  // retain saved code across calls
+
   checkLightSensor();
   checkBattery();
   if (checkButton() == PRESSED)
-  {
-    toggleRelay();
-    toggleStateLED();
-  }
-  updateActiveLED();
-  dumpIRdata();
-}
+    toggleStateLED(); // returns LED on/off
 
-void dumpIRdata()
-{
-  decode_results results;
+  updateActiveLED();
 
   if (irrecv.decode(&results)) // only true when data available
   {
-    switch(results.decode_type)
+    dumpIRdata(&results);
+    storeIRcode = digitalRead(STATE_LED);
+    if (storeIRcode)
     {
-    case NEC       : Serial.print("NEC"   ); break;
-    case SONY      : Serial.print("SONY"  ); break;
-    case RC5       : Serial.print("RC5"   ); break;
-    case RC6       : Serial.print("RC6"   ); break;
-    case DISH      : Serial.print("DISH"  ); break;
-    case SHARP     : Serial.print("SHARP" ); break;
-    case PANASONIC : Serial.print("PANAS: " ); Serial.print(results.panasonicAddress); break;
-    case JVC       : Serial.print("JVC"   ); break;
-    case SANYO     : Serial.print("SANYO" ); break;
-    case MITSUBISHI: Serial.print("MITSUB"); break;
-    case UNKNOWN   : Serial.print("UNK"   ); break;
+      savedCode = results;
+      DEBUG("stored");
     }
-    Serial.print(" Val: ");
-    Serial.println(results.value);
-    Serial.print(" bit: ");
-    Serial.println(results.bits);
-    Serial.print(" rawlen: ");
-    Serial.println(results.rawlen);
-
-    irrecv.resume(); // clear everything and wait for next IR code
+    else if (equalResults(&savedCode, &results))
+    {
+      toggleRelay();
+      DEBUG("match!");
+    }
   }
+}
+
+void dumpIRdata(decode_results *results)
+{
+  switch(results->decode_type)
+  {
+  case NEC       : Serial.print("NEC"   ); break;
+  case SONY      : Serial.print("SONY"  ); break;
+  case RC5       : Serial.print("RC5"   ); break;
+  case RC6       : Serial.print("RC6"   ); break;
+  case DISH      : Serial.print("DISH"  ); break;
+  case SHARP     : Serial.print("SHARP" ); break;
+  case PANASONIC : Serial.print("PANAS: " ); Serial.print(results->panasonicAddress); break;
+  case JVC       : Serial.print("JVC"   ); break;
+  case SANYO     : Serial.print("SANYO" ); break;
+  case MITSUBISHI: Serial.print("MITSUB"); break;
+  case UNKNOWN   : Serial.print("UNK"   ); break;
+  }
+  Serial.print(" Val: ");
+  Serial.println(results->value);
+  Serial.print(" bit: ");
+  Serial.println(results->bits);
+  Serial.print(" rawlen: ");
+  Serial.println(results->rawlen);
+
+  irrecv.resume(); // clear everything and wait for next IR code
+}
+
+// really this should be in IRremote!
+int equalResults(decode_results *a, decode_results *b)
+{
+  // minimal compare..but should be enough
+  return ((a->decode_type == b->decode_type) &&
+          (a->value == b->value));
 }
 
 void checkLightSensor()
