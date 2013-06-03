@@ -94,10 +94,12 @@
 #define IRrx  IFportD1   // input
 #define RELAY THENportD1 // output
 
-// EEPROM locations (only 512bytes!)
-#define EEPROM_VOLTAGE  10
-#define EEPROM_LIGHT    14
-#define EEPROM_RELAY    18
+// EEPROM locations (only 512bytes = 0x00 to 0x1ff!)
+#define EEPROM_VOLTAGE    0x0a // 1 byte
+#define EEPROM_LIGHT      0x0e // 1 byte
+#define EEPROM_RELAY      0x10 // 1 byte
+#define EEPROM_CODE_TYPE  0x20 // leave room for 4 bytes
+#define EEPROM_CODE_VALUE 0x24 // 4 bytes
 
 // some states
 #define PRESSED     1
@@ -164,13 +166,13 @@ void setup()
 
 void loop()
 {
-  int storeIRcode;
+  int storeIRcode = digitalRead(STATE_LED);
   decode_results results;
-  static decode_results savedCode;  // retain saved code across calls
 
   checkLightSensor();
   checkBattery();
-  if (checkButton() == PRESSED)
+  // only toggle STATE_LED on first button press
+  if ((checkButton() == PRESSED) && !storeIRcode)
     toggleStateLED(); // returns LED on/off
 
   updateActiveLED();
@@ -178,13 +180,13 @@ void loop()
   if (irrecv.decode(&results)) // only true when data available
   {
     dumpIRdata(&results);
-    storeIRcode = digitalRead(STATE_LED);
     if (storeIRcode)
     {
-      savedCode = results;
+      saveCodeToEEPROM(&results);
+      digitalWrite(STATE_LED, OFF); // store first & only code! (next loop won't store)
       DEBUG("stored");
     }
-    else if (equalResults(&savedCode, &results))
+    else if (isSavedCode(&results))
     {
       toggleRelay();
       DEBUG("match!");
@@ -209,7 +211,7 @@ void dumpIRdata(decode_results *results)
   case UNKNOWN   : Serial.print("UNK"   ); break;
   }
   Serial.print(" Val: ");
-  Serial.println(results->value);
+  Serial.println(results->value, HEX);
   Serial.print(" bit: ");
   Serial.println(results->bits);
   Serial.print(" rawlen: ");
@@ -218,12 +220,35 @@ void dumpIRdata(decode_results *results)
   irrecv.resume(); // clear everything and wait for next IR code
 }
 
-// really this should be in IRremote!
-int equalResults(decode_results *a, decode_results *b)
+void saveCodeToEEPROM(decode_results *code)
 {
-  // minimal compare..but should be enough
-  return ((a->decode_type == b->decode_type) &&
-          (a->value == b->value));
+  int loop;
+
+  // truncate to char for efficiency
+  EEPROM.write(EEPROM_CODE_TYPE, (code->decode_type & 0xff));
+
+  // save all bytes of value MSB..LSB
+  for(loop = 0; loop <= 3; loop++)
+    EEPROM.write(EEPROM_CODE_VALUE + loop, ((code->value >> (8*loop)) & 0xff));
+}
+
+int isSavedCode(decode_results *code)
+{
+  int loop;
+  int savedType = EEPROM.read(EEPROM_CODE_TYPE);
+  unsigned long savedValue = 0;
+  unsigned long byte;
+
+  // read all bytes of value MSB..LSB
+  for(loop = 3; loop >= 0; loop--)
+  {
+    byte = EEPROM.read(EEPROM_CODE_VALUE + loop);
+    savedValue |= ( (byte & 0xff) << (8*loop) );
+  }
+
+  // minimal compare..but should be enough (truncate type to char for efficiency)
+  return ( (savedType  == (code->decode_type & 0xff)) &&
+           (savedValue ==  code->value) );
 }
 
 void checkLightSensor()
