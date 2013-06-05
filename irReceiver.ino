@@ -125,7 +125,9 @@
 #define BUTTON_DEBOUNCEtime 100 // ms - all samples must be same for valid state
 #define BUTTON_DEBOUNCEperiod 5 // ms - each sample must be at least period apart
 
-// support for sleep functionality
+#define RELAY_MIN_TIME_BEFORE_CHANGE 1000 // ms
+
+// support for sleep functionality (unused currently)
 #include <avr/power.h>
 #include <avr/sleep.h>
 // other libraries
@@ -170,6 +172,8 @@ void setup()
 
 void loop()
 {
+  static unsigned long lastRelayToggle = millis();
+  unsigned long now = millis();
   int storeIRcode;
   int buttonState;
   decode_results results;
@@ -198,7 +202,12 @@ void loop()
     else if (isSavedCode(&results))
     {
       DEBUG("match!");
-      toggleRelay();
+      // first MIN_TIME interval will disallow a toggle
+      if ((now - lastRelayToggle) > RELAY_MIN_TIME_BEFORE_CHANGE)
+      {
+        toggleRelay();
+        lastRelayToggle = now;
+      }
     }
 
     irrecv.resume();     // clear everything and wait for next IR code
