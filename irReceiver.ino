@@ -102,8 +102,10 @@
 #define EEPROM_CODE_VALUE 0x24 // 4 bytes
 
 // some states
-#define PRESSED     1
-#define NOT_PRESSED 0
+#define BUTTON_NOT_PRESSED HIGH  // open = pulled-up
+#define BUTTON_PRESSED     LOW
+#define BUTTON_CHANGE      2
+#define BUTTON_NO_CHANGE   3
 #define LIT         1
 #define NOT_LIT     0
 #define RELAY_OPEN  HIGH // normally open, active low
@@ -119,7 +121,9 @@
 #define ACTIVE_OFFtime  5000 // msec
 #define ACTIVE_LED GREENled
 
-#define BUTTON_DEBOUNCEtime 100 // ms
+// a good reference on debouncing: http://www.ganssle.com/debouncing.htm
+#define BUTTON_DEBOUNCEtime 100 // ms - all samples must be same for valid state
+#define BUTTON_DEBOUNCEperiod 5 // ms - each sample must be at least period apart
 
 // support for sleep functionality
 #include <avr/power.h>
@@ -161,18 +165,21 @@ void setup()
   EEPROM.write(EEPROM_LIGHT, LIT);
   EEPROM.write(EEPROM_RELAY, RELAY_CLOSE);
 
-  Serial.println("booted");
+  DEBUG("booted");
 }
 
 void loop()
 {
-  int storeIRcode = digitalRead(STATE_LED);
+  int storeIRcode;
+  int buttonState;
   decode_results results;
 
   checkLightSensor();
   checkBattery();
-  // only toggle STATE_LED on first button press
-  if ((checkButton() == PRESSED) && !storeIRcode)
+
+  // only toggle STATE_LED on button changes for button press
+  if ((checkButton(&buttonState) == BUTTON_CHANGE) &&
+      (buttonState == BUTTON_PRESSED))
     toggleStateLED(); // returns LED on/off
 
   updateActiveLED();
@@ -180,6 +187,8 @@ void loop()
   if (irrecv.decode(&results)) // only true when data available
   {
     dumpIRdata(&results);
+
+    storeIRcode = digitalRead(STATE_LED);
     if (storeIRcode)
     {
       saveCodeToEEPROM(&results);
@@ -188,14 +197,17 @@ void loop()
     }
     else if (isSavedCode(&results))
     {
-      toggleRelay();
       DEBUG("match!");
+      toggleRelay();
     }
+
+    irrecv.resume();     // clear everything and wait for next IR code
   }
 }
 
 void dumpIRdata(decode_results *results)
 {
+#ifdef DO_DEBUG
   switch(results->decode_type)
   {
   case NEC       : Serial.print("NEC"   ); break;
@@ -216,8 +228,7 @@ void dumpIRdata(decode_results *results)
   Serial.println(results->bits);
   Serial.print(" rawlen: ");
   Serial.println(results->rawlen);
-
-  irrecv.resume(); // clear everything and wait for next IR code
+#endif
 }
 
 void saveCodeToEEPROM(decode_results *code)
@@ -279,28 +290,43 @@ void checkBattery()
   }
 }
 
-int checkButton()
+int checkButton(int *returnState)
 {
-  static int lastPressTime = 0;
-  int button = digitalRead(BUTTON);
-  int state  = NOT_PRESSED;
-  int now    = millis();
+  static int steadyState = BUTTON_NOT_PRESSED;
+  static int lastState   = BUTTON_NOT_PRESSED;
+  static int pollCount   = BUTTON_DEBOUNCEtime / BUTTON_DEBOUNCEperiod;
+  static unsigned long lastPollTime = 0;
+  int button;
+  int stateChanged  = BUTTON_NO_CHANGE;
+  unsigned long now = millis();
 
-  if (button == LOW) // closed = pressed = pulled to GND
+  if (lastPollTime == 0)
+    lastPollTime = now;  // init case, just return steadyState
+  else if ((now - lastPollTime) > BUTTON_DEBOUNCEperiod)
   {
-    if (lastPressTime == 0)
-      lastPressTime = now;
-    else if ((now - lastPressTime) > BUTTON_DEBOUNCEtime)
+    // time to sample the button
+    button = digitalRead(BUTTON);
+    if (button == lastState)
     {
-      DEBUG("button press");
-      state = PRESSED;
-      lastPressTime = 0;
-    }
-    // else pressed..but still bouncing, retain start of press
-  }
-  else lastPressTime = 0;
+      pollCount--;
+      if (pollCount == 0)
+      {
+        if (steadyState != lastState)
+          stateChanged = BUTTON_CHANGE;
 
-  return state;
+        // update debounced state & reset poll counter
+        steadyState = lastState;
+        pollCount   = BUTTON_DEBOUNCEtime / BUTTON_DEBOUNCEperiod;
+        if (steadyState == BUTTON_PRESSED)
+          DEBUG("button press");
+      }
+    }
+    else
+      lastState = button; // still bouncing, store last read
+  }
+
+  *returnState = steadyState;
+  return stateChanged;
 }
 
 int toggleState(int currentState, int state1, int state2)
